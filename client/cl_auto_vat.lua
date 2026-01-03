@@ -1,7 +1,16 @@
+-- cl_auto_vat.lua
 -- rsg-economy/client/cl_auto_vat.lua
 -- Detect in-game Saturday 15:00, then notify server to auto-collect VAT
+-- HARDENED: local throttle to reduce spam
 
 local lastDateKey = nil
+local lastFireMs  = 0
+
+local function dbg(msg)
+    if Config and Config.Debug then
+        print('[rsg-economy][autoVAT] ' .. tostring(msg))
+    end
+end
 
 CreateThread(function()
     while true do
@@ -15,8 +24,11 @@ CreateThread(function()
 
         -- Saturday (6) at 15:00
         if dayOfWeek == 6 and hour == 15 then
-            if lastDateKey ~= dateKey then
+            local now = GetGameTimer()
+            if lastDateKey ~= dateKey and (now - lastFireMs) > 60000 then
                 lastDateKey = dateKey
+                lastFireMs  = now
+                dbg('Triggering server auto VAT collect for ' .. dateKey)
                 TriggerServerEvent('rsg-economy:autoVatCollect')
             end
         end
