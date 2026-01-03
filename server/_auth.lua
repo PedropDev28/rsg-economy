@@ -1,3 +1,5 @@
+-- _auth.lua
+
 --======================================================================
 -- rsg-economy / server/_auth.lua
 -- Region authorization + region alias helpers
@@ -11,10 +13,6 @@ local RSGCore   = exports['rsg-core']:GetCoreObject()
 local GOV_TABLE = Config.TableName or 'governors'
 
 -- Basic admin override:
---  - Console
---  - Specific ACE perm (command.*)
---  - Global ACE (Config.AcePermission)
---  - group.admin
 local function isAdminOverride(src, perm)
     if src == 0 then return true end
 
@@ -33,7 +31,6 @@ end
 local function isRegionGovernorSourceOfTruth(src, region_name)
     region_name = string.lower(region_name or 'unknown')
 
-    -- Preferred: delegate to rsg-governor if it exposes IsRegionGovernor
     local ok, res = pcall(function()
         if exports['rsg-governor'] and exports['rsg-governor'].IsRegionGovernor then
             return exports['rsg-governor']:IsRegionGovernor(src, region_name)
@@ -43,7 +40,7 @@ local function isRegionGovernorSourceOfTruth(src, region_name)
         return res == true
     end
 
-    -- Optional ACE fallback per region (e.g. add_ace group.governor role.governor.new_hanover allow)
+    -- Optional ACE fallback per region:
     if IsPlayerAceAllowed(src, ('role.governor.%s'):format(region_name)) then
         return true
     end
@@ -52,7 +49,6 @@ local function isRegionGovernorSourceOfTruth(src, region_name)
 end
 
 -- Public guard: call this before changing taxes, registering businesses, VAT, etc.
--- perm is an ACE override string, e.g. 'command.settax' / 'command.vataudit'
 local function CanActOnRegion(src, targetRegion, perm)
     if not targetRegion or targetRegion == '' then return false end
     targetRegion = string.lower(targetRegion)
@@ -62,12 +58,20 @@ end
 exports('CanActOnRegion', CanActOnRegion)
 
 -- Region alias helper for VAT, HUD, etc.
--- Uses rsg-governor:getRegionHash callback: expected to return (hash, alias).
+-- HARDENED: governor callback might not exist in your current stack.
 local function GetPlayerRegionAlias(src)
+    -- 1) Preferred: rsg-governor callback (source of truth)
     local ok, hash, alias = pcall(function()
         return lib.callback.await('rsg-governor:getRegionHash', src)
     end)
+    if ok and alias and alias ~= '' then
+        return string.lower(alias)
+    end
 
+    -- 2) Fallback: if you have an economy-owned region callback
+    ok, hash, alias = pcall(function()
+        return lib.callback.await('rsg-economy:getRegionHash', src)
+    end)
     if ok and alias and alias ~= '' then
         return string.lower(alias)
     end
