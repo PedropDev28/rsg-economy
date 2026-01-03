@@ -1,3 +1,5 @@
+-- sv_vat.lua
+
 --========================================================--
 -- rsg-economy / server/sv_vat.lua
 -- Hybrid VAT v2.0 (Full Ledger Mode)
@@ -178,7 +180,7 @@ local function notify(src, title, msg, ntype, ms)
 end
 
 ------------------------------------------------------------
--- Region detection helper (via rsg-economy/_auth → rsg-governor)
+-- Region detection helper (via rsg-economy/_auth)
 ------------------------------------------------------------
 local function getCallerRegionName(src)
     local ok, alias = pcall(function()
@@ -243,17 +245,28 @@ RegisterNetEvent("vat:clientSettle", function(data)
         return notify(src, "VAT", "Nothing to settle.", "inform")
     end
 
+    -- IMPORTANT: keep money operations deterministic (whole dollars)
     if net > 0 then
-        if not Player.Functions.RemoveMoney("cash", net) then
+        local pay = math.floor(net + 0.5)
+        if pay <= 0 then
+            return notify(src, "VAT", "Nothing to settle.", "inform")
+        end
+
+        if not Player.Functions.RemoveMoney("cash", pay, "vat-settlement") then
             return notify(src, "VAT", "Insufficient cash to settle VAT.", "error")
         end
+
         VAT_Settle(citizenid, region, "Owner VAT Settlement")
-        notify(src, "VAT", ("You paid %s in VAT."):format(("$%.2f"):format(net)), "success")
+        notify(src, "VAT", ("You paid $%d in VAT."):format(pay), "success")
     else
-        local refund = -net
+        local refund = math.floor((-net) + 0.5)
+        if refund <= 0 then
+            return notify(src, "VAT", "Nothing to settle.", "inform")
+        end
+
         Player.Functions.AddMoney("cash", refund, "vat-refund")
         VAT_Settle(citizenid, region, "VAT Refund")
-        notify(src, "VAT", ("You received a refund of %s."):format(("$%.2f"):format(refund)), "success")
+        notify(src, "VAT", ("You received a refund of $%d."):format(refund), "success")
     end
 end)
 
@@ -511,7 +524,7 @@ RegisterNetEvent('rsg-economy:autoVatCollect', function()
     print('[rsg-economy] Auto VAT collect triggered.')
 
     -- For each VAT-enabled region, settle VAT for all businesses
-    local enabledRegions = {}
+    local enabledRegions
     if Config.VAT.EnabledGlobal then
         -- settle for ALL regions found in economy_businesses
         enabledRegions = nil
@@ -524,12 +537,20 @@ RegisterNetEvent('rsg-economy:autoVatCollect', function()
         end
     end
 
+    local function makePlaceholders(n)
+        local t = {}
+        for i = 1, n do
+            t[i] = "?"
+        end
+        return table.concat(t, ",")
+    end
+
     local rows
     if enabledRegions == nil then
         rows = MySQL.query.await("SELECT DISTINCT citizenid, region_name FROM economy_businesses") or {}
     else
         if #enabledRegions == 0 then return end
-        local placeholders = table.concat(vim.tbl_map(function() return "?" end, enabledRegions), ",")
+        local placeholders = makePlaceholders(#enabledRegions)
         rows = MySQL.query.await(
             ("SELECT DISTINCT citizenid, region_name FROM economy_businesses WHERE region_name IN ("..placeholders..")"),
             enabledRegions
@@ -545,4 +566,3 @@ RegisterNetEvent('rsg-economy:autoVatCollect', function()
         end
     end
 end)
-
