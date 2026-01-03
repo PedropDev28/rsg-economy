@@ -1,12 +1,8 @@
+-- sv_tax.lua
+
 --======================================================================
 -- rsg-economy / server/sv_tax.lua (CLEANED)
 -- Multi-category tax system stored in `economy_taxes`
--- Permissions: Region Governor OR Server Owner/Admin (via CanActOnRegion)
--- Commands: /settax [region] [property|trade|sales] [percent]
---           /gettax [region]
---           /cleartax [region] [category|all]
---           /debugtax [region] [category] [base]
--- Exports : ApplyTaxByRegionName, ApplyTaxForPlayerRegion
 --======================================================================
 
 local RSGCore   = exports['rsg-core']:GetCoreObject()
@@ -33,18 +29,31 @@ local function notify(src, desc, type_)
     })
 end
 
+-- HARDENED: try governor callback first, then economy callback; retry once.
 local function fetchClientRegion(src)
-    local ok, h, name = pcall(function()
-        return lib.callback.await('rsg-economy:getRegionHash', src)
-    end)
-    if ok and h then return h, name end
+    local function tryCall(cbName)
+        local ok, h, name = pcall(function()
+            return lib.callback.await(cbName, src)
+        end)
+        if ok and h then
+            return h, name
+        end
+        return nil, nil
+    end
+
+    local h, name = tryCall('rsg-governor:getRegionHash')
+    if h then return h, name end
+
+    h, name = tryCall('rsg-economy:getRegionHash')
+    if h then return h, name end
 
     Wait(200)
 
-    ok, h, name = pcall(function()
-        return lib.callback.await('rsg-economy:getRegionHash', src)
-    end)
-    if ok and h then return h, name end
+    h, name = tryCall('rsg-governor:getRegionHash')
+    if h then return h, name end
+
+    h, name = tryCall('rsg-economy:getRegionHash')
+    if h then return h, name end
 
     return nil, nil
 end
@@ -53,14 +62,11 @@ end
 -- Residency-based tax factor (rsg_residency + document check)
 -----------------------------------------------------------------
 
--- Reads a player's residency record from the rsg_residency table.
--- We don't assume exact column names; we try a few common ones.
 local function getResidencyRegionForCitizen(citizenid)
     if not citizenid or citizenid == '' then
         return nil
     end
 
-    -- Adjust the table name if yours differs.
     local row = MySQL.single.await('SELECT * FROM rsg_residency WHERE citizenid = ? LIMIT 1', {
         citizenid
     })
@@ -72,14 +78,11 @@ local function getResidencyRegionForCitizen(citizenid)
         row.region       or
         row.state        or
         row.zone         or
-        row.region_hash  -- if you store the hash instead of alias
+        row.region_hash
 
     return region
 end
 
--- A player is considered "resident" IF:
---   1) They have the residency document item in inventory
---   2) Their rsg_residency row region matches the current tax region
 local function playerHasValidResidency(Player, regionName)
     if not Config or not Config.ResidencyTax or not Config.ResidencyTax.Enabled then
         return false
@@ -94,7 +97,6 @@ local function playerHasValidResidency(Player, regionName)
         return false
     end
 
-    -- 1) Check inventory for residency document
     local docItemName = Config.ResidencyTax.DocItem or 'residency_document'
     local items       = Player.PlayerData.items or {}
     local hasDoc      = false
@@ -110,7 +112,6 @@ local function playerHasValidResidency(Player, regionName)
         return false
     end
 
-    -- 2) Get residency region from rsg_residency
     local homeRegion = getResidencyRegionForCitizen(citizenid)
     if not homeRegion or homeRegion == '' then
         return false
@@ -122,9 +123,6 @@ local function playerHasValidResidency(Player, regionName)
     return homeNorm == regionNorm
 end
 
--- Returns a multiplier (factor) for the tax percent:
---   effectivePct = basePct * factor
--- e.g. basePct=10%, ResidentPercent=50 → factor=0.5 → effective 5%
 local function getResidencyTaxFactor(src, regionName, category)
     if not Config or not Config.ResidencyTax or not Config.ResidencyTax.Enabled then
         return 1.0
@@ -132,7 +130,6 @@ local function getResidencyTaxFactor(src, regionName, category)
 
     category = tostring(category or 'sales'):lower()
 
-    -- Gate by category if configured
     if Config.ResidencyTax.Categories
        and Config.ResidencyTax.Categories[category] == false then
         return 1.0
@@ -172,7 +169,6 @@ end
 -- DB helpers
 -- -----------------------
 
--- Upsert one row (region_name + tax_category -> tax_percent)
 local function UpsertTax(region_name, category, percent)
     region_name = normName(region_name)
     category    = tostring(category or ''):lower()
@@ -185,7 +181,6 @@ local function UpsertTax(region_name, category, percent)
     return res ~= nil
 end
 
--- Clear one or all categories for a region
 local function ClearTax(region_name, catOrAll)
     region_name = normName(region_name)
     catOrAll    = tostring(catOrAll or 'all'):lower()
@@ -203,7 +198,6 @@ local function ClearTax(region_name, catOrAll)
     return res ~= nil
 end
 
--- Get tax row(s) for a region; result = { property=%, trade=%, sales=% }
 local function GetTaxesForRegionName(region_name)
     if not region_name or region_name == '' then
         return { property = 0, trade = 0, sales = 0 }
@@ -230,7 +224,6 @@ local function GetTaxesForRegionName(region_name)
     return out
 end
 
--- Basic calc helper
 local function CalcTax(basePrice, quantity, taxPercent)
     local subtotal  = (tonumber(basePrice) or 0) * (tonumber(quantity) or 1)
     local taxAmount = subtotal * ((tonumber(taxPercent) or 0) / 100)
@@ -238,7 +231,6 @@ local function CalcTax(basePrice, quantity, taxPercent)
     return subtotal, taxAmount, total
 end
 
--- Resolve "here" -> player's current region alias
 local function resolveTargetRegion(src, regionArg)
     if not regionArg or regionArg == 'here' then
         local _, hereName = fetchClientRegion(src)
@@ -275,7 +267,6 @@ RSGCore.Commands.Add(
             return notify(src, 'Could not determine your region. Move a bit and try again.', 'error')
         end
 
-        -- Permission check via rsg-economy _auth
         local okAuth = false
         local ok, res = pcall(function()
             return exports['rsg-economy']:CanActOnRegion(src, regionName, 'command.settax')
@@ -413,27 +404,19 @@ exports('ApplyTaxByRegionName', function(region_name, category, basePrice, quant
     }
 end)
 
--- src       : player id
--- category  : "property" | "trade" | "sales"
--- basePrice : per-unit price before tax
--- quantity  : number of units
 exports('ApplyTaxForPlayerRegion', function(src, category, basePrice, quantity)
     category = tostring(category or 'sales'):lower()
     quantity = tonumber(quantity or 1) or 1
 
-    -- Determine which region the player is currently in
     local _, regionAlias = fetchClientRegion(src)
     local regionName     = regionAlias and normName(regionAlias) or nil
 
-    -- Base configured tax for that region + category
     local taxes   = GetTaxesForRegionName(regionName)
     local basePct = tonumber(taxes[category] or 0) or 0
 
-    -- Apply residency multiplier (resident discount vs non-resident full rate)
     local factor = getResidencyTaxFactor(src, regionName or 'unknown', category)
     local pct    = basePct * factor
 
-    -- Calculate money amounts
     local subtotal, tax, total = CalcTax(basePrice, quantity, pct)
 
     if Config.Debug then
@@ -443,10 +426,10 @@ exports('ApplyTaxForPlayerRegion', function(src, category, basePrice, quantity)
 
     return {
         region_name  = regionName or 'unknown',
-        subtotal     = subtotal,  -- amount seller receives (pre-tax)
-        tax          = tax,       -- amount going into revenue
-        total        = total,     -- amount buyer pays
-        percent      = pct,       -- effective percent after residency multiplier
-        base_percent = basePct,   -- raw configured rate (for UI/logs if needed)
+        subtotal     = subtotal,
+        tax          = tax,
+        total        = total,
+        percent      = pct,
+        base_percent = basePct,
     }
 end)
